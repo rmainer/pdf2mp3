@@ -93,6 +93,6 @@ required arguments:
 There are two examples in the [doc](./doc/) directory:
 
 * [example-google](./doc/example-google.sh)
-* [example-espeakng](/.doc/example-espeakng.sh)
+* [example-espeakng](./doc/example-espeakng.sh)
 
 To run these examples you first have to do the installation steps mentioned earlier and install the `tesseract-ocr-deu` package.
