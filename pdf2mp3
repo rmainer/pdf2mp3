@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+
+"""Converts a PDF text file to a mp3 audio file."""
+
+import argparse
+import multiprocessing
+import os
+import time
+import sys
+
+from typing import Dict
+
+# PyPi modules
+from progress.bar import Bar as Progressbar
+from progress.spinner import Spinner
+
+# check for poppler
+try:
+    import poppler
+except e:
+    has_poppler = False
+    print("Error: libpoppler is required but could not be found!")
+    sys.exit(1)
+
+
+def parse_cmd_line_arguments() -> Dict:
+    """parse command line arguments"""
+    parser = argparse.ArgumentParser(prog='pdf2mp3', description='Converts a PDF text file to a MP3 audio file.',
+                                     add_help=True)
+
+    required = parser.add_argument_group('required arguments')
+    required.add_argument('--input', metavar='<file>', type=str, required=True, nargs=1, help='Source PDF file')
+    required.add_argument('--output', metavar='<file>', type=str, required=True, nargs=1,
+                          help='Destination MP3 file')
+    parser.add_argument('--page-start', metavar='<N>', type=int, required=False, nargs=1,
+                        help='Page to begin with, default: 1')
+    parser.add_argument('--page-end', metavar='<N>', type=int, required=False, nargs=1,
+                        help='Page to end on, default: last page')
+    parser.add_argument('--dpi', metavar='<num>', type=int, required=False, nargs=1,
+                        help='DPI for the page renderer, default: 150')
+    parser.add_argument('--tesseract', metavar='<lang>', type=str, required=False, nargs=1,
+                        help='Use Tesseract OCR with given language')
+    parser.add_argument('--google-oauth2-key', metavar='<file>', type=str, required=False, nargs=1,
+                        help='Use Google Text-To-Speech with the <key> file')
+    parser.add_argument('--google-texttospeech-language-code', metavar='<code>', type=str, required=False, nargs=1,
+                        help='BCP-47 language tag, e.g. "en-US" or "de-DE"')
+    parser.add_argument('--google-texttospeech-voice-name', metavar='<voice>', type=str, required=False, nargs=1,
+                        help='Google Text-To-Speech voice name')
+    parser.add_argument('--espeak-ng', metavar='<lang>', type=str, required=False, nargs=1,
+                        help='Use Espeak NG with the given language')
+    parser.add_argument('--sidecar', metavar='<file>', type=str, required=False, help='Saves the text to a txt file')
+    parser.add_argument('--mp3-artist', metavar='<name>', type=str, required=False, help='ID3 artist')
+    parser.add_argument('--mp3-title', metavar='<name>', type=str, required=False, help='ID3 title')
+
+    # Namespace -> Dict
+    return vars(parser.parse_args())
+
+
+def poppler_get_num_pages(file: str) -> int:
+    """Gets the number of pages"""
+    pdf = poppler.load_from_file(file)
+    return pdf.pages
+
+
+def poppler_get_text(file: str, start: int, end: int) -> str:
+    """Get text from a PDF, if it has a text layer"""
+    text = ""
+
+    print("[!!] Poppler: looking for the text layer")
+    pdf = poppler.load_from_file(file)
+
+    for i in range(start, end + 1):
+        page = pdf.create_page(i - 1)
+        text += page.text()
+
+    return text
+
+
+def poppler_convert_to_image(file: str, dpi: int, start: int, end: int) -> int:
+    """Convert a pdf to PNG files (one file per page)"""
+
+    pdf = poppler.load_from_file(file)
+    renderer = poppler.PageRenderer()
+
+    bar = Progressbar('[!!] Poppler: converting pdf pages to images', max=(end - start + 1))
+
+    for i in range(start, end + 1):
+        bar.next()
+        page = pdf.create_page(i - 1)
+        image = renderer.render_page(page, xres=dpi, yres=dpi)
+        image.save(f'{i}.png', 'PNG')
+
+    bar.finish()
+    return pdf.pages
+
+
+def tesseract_scan_pages(start: int, end: int, language: str) -> str:
+    """Scan all pages"""
+    try:
+        from PIL import Image
+    except ImportError:
+        import Image
+    try:
+        import pytesseract
+    except ImportError:
+        print("[EE] Error: please install pytesseract")
+        sys.exit(1)
+
+    bar = Progressbar('[!!] Tesseract: processing images', max=(end - start + 1))
+
+    text = ''
+    for i in range(start, end + 1):
+        bar.next()
+        text += pytesseract.image_to_string(Image.open(f'{i}.png'), lang=language)
+        os.unlink(f'{i}.png')
+    bar.finish()
+    return text
+
+
+def espeak_ng_text_to_wav(text: str, voice: str) -> None:
+    """Convert text to wav"""
+    try:
+        from espeakng import ESpeakNG
+    except ImportError:
+        print("[EE] Error: Please install py-espeak-ng")
+        sys.exit(1)
+
+    def spinner(s) -> None:
+        while True:
+            s.next()
+            time.sleep(0.05)
+
+    def worker(voice: str) -> None:
+        esng = ESpeakNG()
+        esng.voice = voice
+        wav = esng.synth_wav(text)
+        with open('output.wav', 'wb') as fd:
+            fd.write(wav)
+
+    s = Spinner('[!!] eSpeak NG: synthesizing text ')
+    st = multiprocessing.Process(target=spinner, args=(s,))
+    wt = multiprocessing.Process(target=worker, args=(voice,))
+    st.start()
+    wt.start()
+    wt.join()
+    st.terminate()
+    s.finish()
+
+
+def pydub_convert_to_mp3(wav: str, mp3: str) -> None:
+    """Convert wav to mp3"""
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        print("[EE] Error: please install pydub")
+        sys.exit(1)
+
+    def spinner(s) -> None:
+        while True:
+            s.next()
+            time.sleep(0.05)
+
+    def worker(wav: str, mp3: str) -> None:
+        sound = AudioSegment.from_wav(wav)
+        sound.export(mp3, format="mp3")
+        os.unlink(wav)
+
+    s = Spinner('[!!] FFmpeg: converting wav to mp3 ')
+    st = multiprocessing.Process(target=spinner, args=(s,))
+    wt = multiprocessing.Process(target=worker, args=(wav, mp3,))
+    st.start()
+    wt.start()
+    wt.join()
+    st.terminate()
+    s.finish()
+
+
+def google_texttospeech(text: str, output: str, key: str, language_code: str, voice_name: str) -> None:
+    """Google Cloud Text-To-Speech"""
+    try:
+        from google.oauth2 import service_account
+        from google.cloud import texttospeech
+    except ImportError:
+        print("[EE] Error: please install google-cloud-texttospeech")
+        sys.exit(1)
+
+    def spinner(s) -> None:
+        while True:
+            s.next()
+            time.sleep(0.05)
+
+    def worker(text: str, output: str, key: str, language_code: str, voice_name: str) -> None:
+        credentials = service_account.Credentials.from_service_account_file(key)
+
+        client = texttospeech.TextToSpeechClient(credentials=credentials)
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=language_code,
+            name=voice_name
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+        response = client.synthesize_speech(
+            input=synthesis_input, voice=voice, audio_config=audio_config
+        )
+        with open(output, "wb") as out:
+            out.write(response.audio_content)
+
+    s = Spinner('[!!] Google Cloud Text-To-Speech ')
+    st = multiprocessing.Process(target=spinner, args=(s,))
+    wt = multiprocessing.Process(target=worker, args=(text, output, key, language_code, voice_name,))
+    st.start()
+    wt.start()
+    wt.join()
+    st.terminate()
+    s.finish()
+
+
+def mp3_set_id3(file: str, artist: str, title: str) -> None:
+    """Writes IDv3 Tags"""
+    try:
+        import eyed3
+    except ImportError:
+        print("[EE] Error: please install eyed3")
+
+    print("[!!] eyed3: Setting ID3 tags")
+    mp3 = eyed3.load(file)
+    mp3.initTag()
+    mp3.tag.artist = artist
+    mp3.tag.title = title
+    mp3.tag.save()
+
+
+def save_text_to_file(file: str, text: str) -> None:
+    """Saves the text to a txt file"""
+    print(f"[!!] Generating sidecar: {file}")
+    with open(file, 'w') as fd:
+        fd.write(text)
+
+
+# main
+if __name__ == "__main__":
+    args = parse_cmd_line_arguments()
+    text = ""
+    pdf_file = args['input'][0]
+    mp3_file = args['output'][0]
+    mp3_generated = False
+    num_pages = poppler_get_num_pages(file=pdf_file)
+    page_start = 1
+    page_end = num_pages
+
+    if 'page_start' in args and args['page_start'] is not None:
+        page_start = int(args['page_start'][0])
+        if page_start < 1:
+            page_start = 1
+
+    if 'page_end' in args and args['page_end'] is not None:
+        page_end = int(args['page_end'][0])
+        if num_pages < page_end:
+            page_end = num_pages
+
+    # tesseract doesn't work well one low dpi images
+    dpi = 150
+    if 'dpi' in args and args['dpi'] is not None:
+        try:
+            dpi = int(args['dpi'][0])
+        except ValueError:
+            dpi = 150
+
+        if dpi < 150:
+            dpi = 150
+
+    print(f'[!!] Input file: {pdf_file}, {num_pages} page(s)')
+    print(f'[!!] Going to process page {page_start} to page {page_end}')
+
+    # try to extract the text layer
+    text = poppler_get_text(file=pdf_file, start=page_start, end=page_end)
+
+    # fallback: use tesseract ocr
+    if text == "" and not ('tesseract' in args and args['tesseract'] is not None):
+        print("[EE] No text layer found, please use the --tesseract <lang> option to enable OCR!")
+        sys.exit(0)
+    else:
+        num_pages = poppler_convert_to_image(file=pdf_file, dpi=dpi, start=page_start, end=page_end)
+        text = tesseract_scan_pages(start=page_start, end=page_end, language='eng+deu')
+
+    # is there usable text?
+    if text == "":
+        print(f"[EE] Error: Neither libpoppler nor tesseract where able to extract text from {pdf_file}!")
+        sys.exit(1)
+
+    # write the text to a file if demanded
+    if 'sidecar' in args and args['sidecar'] is not None:
+        save_text_to_file(args['sidecar'], text)
+
+    # speech synthesis with eSpeak NG
+    if 'espeak_ng' in args and args['espeak_ng'] is not None:
+        espeak_ng_text_to_wav(text=text, voice=args['espeak_ng'][0])
+        pydub_convert_to_mp3('output.wav', mp3_file)
+        mp3_generated = True
+
+    # if Google Cloud Text-To-Speech is preferred
+    if not mp3_generated:
+        google_key = ""
+        google_voice = ""
+        google_language_code = ""
+        if 'google_oauth2_key' in args and args['google_oauth2_key'] is not None:
+            google_key = args['google_oauth2_key'][0]
+        if 'google_texttospeech_voice_name' in args and args['google_texttospeech_voice_name'] is not None:
+            google_voice = args['google_texttospeech_voice_name'][0]
+        if 'google_texttospeech_language_code' in args and args['google_texttospeech_language_code'] is not None:
+            google_language_code = args['google_texttospeech_language_code'][0]
+        if google_key != "" and google_voice != "" and google_language_code != "":
+            google_texttospeech(text=text, output=mp3_file, key=google_key, language_code=google_language_code,
+                                voice_name=google_voice)
+
+    # add ID3 tags to the output file
+    mp3_artist = ""
+    mp3_title = ""
+    if 'mp3_artist' in args and args['mp3_artist'] is not None:
+        mp3_artist = args['mp3_artist']
+    if 'mp3_title' in args and args['mp3_title'] is not None:
+        mp3_title = args['mp3_title']
+    mp3_set_id3(file=mp3_file, artist=mp3_artist, title=mp3_title)
+
+    print("[!!] Finished!")

@@ -1,0 +1,7 @@
+eyed3
+google-cloud-texttospeech
+progress
+pydub
+pytesseract
+python-poppler
+py-espeak-ng
