@@ -10,7 +10,7 @@
 
 ### Features
 
-* Completely reworked the text processing: now every page is treaded as and individual document
+* Completely reworked the text processing: now every page is treaded as an individual document
 
 ## 0.1-alpha (2021-04-02)
 
