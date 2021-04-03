@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2-alpha](https://www.github.com/googleapis/python-texttospeech/compare/v0.1-alpha...v0.2-alpha) (2021-04-03)
+## [0.2-alpha](https://www.github.com/rmainer/pdf2mp3/compare/v0.1-alpha...v0.2-alpha) (2021-04-03)
 
 ### Bugfixes
 
