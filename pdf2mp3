@@ -5,23 +5,77 @@
 import argparse
 import multiprocessing
 import os
-import time
+import os.path
 import sys
+import time
 
 from typing import Dict
 
+# global variables
+has_espeakng = True
+has_eyed3 = True
+has_google_texttospeech = True
+has_poppler = True
+has_progress = True
+has_pydub = True
+has_tesseract = True
+
 # PyPi modules
-from progress.bar import Bar as Progressbar
-from progress.spinner import Spinner
+
+# check for progress
+try:
+    from progress.bar import Bar as Progressbar
+    from progress.spinner import Spinner
+except ImportError:
+    print("[EE] Error: please install progress!")
+    has_progress = False
+    sys.exit(1)
 
 # check for poppler
 try:
     import poppler
-except e:
+except ImportError:
+    print("[EE] Error: libpoppler is required but could not be found!")
     has_poppler = False
-    print("Error: libpoppler is required but could not be found!")
     sys.exit(1)
 
+# check for pytesseract
+try:
+    from PIL import Image
+except ImportError:
+    import Image
+try:
+    import pytesseract
+except ImportError:
+    has_tesseract = False
+
+# check for espeak-ng
+try:
+    from espeakng import ESpeakNG
+except ImportError:
+    has_espeakng = False
+
+# check for google text-to-speech
+try:
+    from google.oauth2 import service_account
+    from google.cloud import texttospeech
+except ImportError:
+    has_google_texttospeech = False
+
+# check for eyed3
+try:
+    import eyed3
+except ImportError:
+    has_eyed3 = False
+
+# check for pydub
+try:
+    from pydub import AudioSegment
+except ImportError:
+    has_pydub = False
+
+
+# methods
 
 def parse_cmd_line_arguments() -> Dict:
     """parse command line arguments"""
@@ -62,93 +116,48 @@ def poppler_get_num_pages(file: str) -> int:
     return pdf.pages
 
 
-def poppler_get_text(file: str, start: int, end: int) -> str:
+def poppler_get_text(file: str, page: int) -> str:
     """Get text from a PDF, if it has a text layer"""
-    text = ""
-
-    print("[!!] Poppler: looking for the text layer")
     pdf = poppler.load_from_file(file)
+    page = pdf.create_page(page - 1)
 
-    for i in range(start, end + 1):
-        page = pdf.create_page(i - 1)
-        text += page.text()
-
-    return text
+    return page.text()
 
 
-def poppler_convert_to_image(file: str, dpi: int, start: int, end: int) -> int:
+def poppler_convert_to_image(file: str, dpi: int, page: int) -> None:
     """Convert a pdf to PNG files (one file per page)"""
-
     pdf = poppler.load_from_file(file)
     renderer = poppler.PageRenderer()
-
-    bar = Progressbar('[!!] Poppler: converting pdf pages to images', max=(end - start + 1))
-
-    for i in range(start, end + 1):
-        bar.next()
-        page = pdf.create_page(i - 1)
-        image = renderer.render_page(page, xres=dpi, yres=dpi)
-        image.save(f'{i}.png', 'PNG')
-
-    bar.finish()
-    return pdf.pages
+    pdf_page = pdf.create_page(page - 1)
+    image = renderer.render_page(pdf_page, xres=dpi, yres=dpi)
+    image.save(f'page-{page}.png', 'PNG')
 
 
-def tesseract_scan_pages(start: int, end: int, language: str) -> str:
+def tesseract_scan_page(page: int, language: str) -> str:
     """Scan all pages"""
-    try:
-        from PIL import Image
-    except ImportError:
-        import Image
-    try:
-        import pytesseract
-    except ImportError:
-        print("[EE] Error: please install pytesseract")
-        sys.exit(1)
-
-    bar = Progressbar('[!!] Tesseract: processing images', max=(end - start + 1))
-
-    text = ''
-    for i in range(start, end + 1):
-        bar.next()
-        text += pytesseract.image_to_string(Image.open(f'{i}.png'), lang=language)
-        os.unlink(f'{i}.png')
-    bar.finish()
+    text = pytesseract.image_to_string(Image.open(f'page-{page}.png'), lang=language)
+    os.unlink(f'page-{page}.png')
     return text
 
 
-def espeak_ng_text_to_wav(text: str, voice: str) -> None:
+def espeak_ng_text_to_wav(text: str, voice: str, page: int) -> None:
     """Convert text to wav"""
-    try:
-        from espeakng import ESpeakNG
-    except ImportError:
-        print("[EE] Error: Please install py-espeak-ng")
-        sys.exit(1)
-
-    def spinner(s) -> None:
-        while True:
-            s.next()
-            time.sleep(0.05)
-
-    def worker(voice: str) -> None:
-        esng = ESpeakNG()
-        esng.voice = voice
-        wav = esng.synth_wav(text)
-        with open('output.wav', 'wb') as fd:
-            fd.write(wav)
-
-    s = Spinner('[!!] eSpeak NG: synthesizing text ')
-    st = multiprocessing.Process(target=spinner, args=(s,))
-    wt = multiprocessing.Process(target=worker, args=(voice,))
-    st.start()
-    wt.start()
-    wt.join()
-    st.terminate()
-    s.finish()
+    esng = ESpeakNG()
+    esng.voice = voice
+    wav = esng.synth_wav(text)
+    with open(f'page-{page}.wav', 'wb') as fd:
+        fd.write(wav)
 
 
-def pydub_convert_to_mp3(wav: str, mp3: str) -> None:
+def pydub_convert_to_mp3(page: int) -> None:
     """Convert wav to mp3"""
+    sound = AudioSegment.from_wav(f'page-{page}.wav')
+    sound.export(f'page-{page}.mp3', format="mp3")
+    os.unlink(f'page-{page}.wav')
+
+
+def pydub_concat_mp3s(mp3_file: str, page_start: int, page_end: int) -> None:
+    """Concats mp3s"""
     try:
         from pydub import AudioSegment
     except ImportError:
@@ -160,14 +169,20 @@ def pydub_convert_to_mp3(wav: str, mp3: str) -> None:
             s.next()
             time.sleep(0.05)
 
-    def worker(wav: str, mp3: str) -> None:
-        sound = AudioSegment.from_wav(wav)
-        sound.export(mp3, format="mp3")
-        os.unlink(wav)
+    def worker(mp3_file, page_start, page_end):
+        combined = AudioSegment.empty()
 
-    s = Spinner('[!!] FFmpeg: converting wav to mp3 ')
+        for page in range(page_start, page_end + 1):
+            combined += AudioSegment.from_mp3(f'page-{page}.mp3')
+
+        combined.export(mp3_file, format="mp3")
+
+        for page in range(page_start, page_end + 1):
+            os.unlink(f'page-{page}.mp3')
+
+    s = Spinner('[!!] pydub: concatenating mp3s ')
     st = multiprocessing.Process(target=spinner, args=(s,))
-    wt = multiprocessing.Process(target=worker, args=(wav, mp3,))
+    wt = multiprocessing.Process(target=worker, args=(mp3_file, page_start, page_end))
     st.start()
     wt.start()
     wt.join()
@@ -177,53 +192,26 @@ def pydub_convert_to_mp3(wav: str, mp3: str) -> None:
 
 def google_texttospeech(text: str, output: str, key: str, language_code: str, voice_name: str) -> None:
     """Google Cloud Text-To-Speech"""
-    try:
-        from google.oauth2 import service_account
-        from google.cloud import texttospeech
-    except ImportError:
-        print("[EE] Error: please install google-cloud-texttospeech")
-        sys.exit(1)
+    credentials = service_account.Credentials.from_service_account_file(key)
 
-    def spinner(s) -> None:
-        while True:
-            s.next()
-            time.sleep(0.05)
-
-    def worker(text: str, output: str, key: str, language_code: str, voice_name: str) -> None:
-        credentials = service_account.Credentials.from_service_account_file(key)
-
-        client = texttospeech.TextToSpeechClient(credentials=credentials)
-        synthesis_input = texttospeech.SynthesisInput(text=text)
-        voice = texttospeech.VoiceSelectionParams(
-            language_code=language_code,
-            name=voice_name
-        )
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3
-        )
-        response = client.synthesize_speech(
-            input=synthesis_input, voice=voice, audio_config=audio_config
-        )
-        with open(output, "wb") as out:
-            out.write(response.audio_content)
-
-    s = Spinner('[!!] Google Cloud Text-To-Speech ')
-    st = multiprocessing.Process(target=spinner, args=(s,))
-    wt = multiprocessing.Process(target=worker, args=(text, output, key, language_code, voice_name,))
-    st.start()
-    wt.start()
-    wt.join()
-    st.terminate()
-    s.finish()
+    client = texttospeech.TextToSpeechClient(credentials=credentials)
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice_name
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3
+    )
+    response = client.synthesize_speech(
+        input=synthesis_input, voice=voice, audio_config=audio_config
+    )
+    with open(output, "wb") as out:
+        out.write(response.audio_content)
 
 
 def mp3_set_id3(file: str, artist: str, title: str) -> None:
     """Writes IDv3 Tags"""
-    try:
-        import eyed3
-    except ImportError:
-        print("[EE] Error: please install eyed3")
-
     print("[!!] eyed3: Setting ID3 tags")
     mp3 = eyed3.load(file)
     mp3.initTag()
@@ -241,26 +229,42 @@ def save_text_to_file(file: str, text: str) -> None:
 
 # main
 if __name__ == "__main__":
-    args = parse_cmd_line_arguments()
     text = ""
-    pdf_file = args['input'][0]
-    mp3_file = args['output'][0]
     mp3_generated = False
-    num_pages = poppler_get_num_pages(file=pdf_file)
-    page_start = 1
-    page_end = num_pages
+    use_tesseract = False
+    use_espeak_ng = False
+    use_google_texttospeech = False
+    use_eyed3 = False
+    use_sidecar = False
 
+    # parse command line options
+    args = parse_cmd_line_arguments()
+
+    # input file
+    pdf_file = args['input'][0]
+    if not os.path.exists(pdf_file):
+        print(f"[EE] Input file '{pdf_file}' does not exist!")
+        sys.exit(0)
+    num_pages = poppler_get_num_pages(file=pdf_file)
+
+    # output file
+    mp3_file = args['output'][0]
+
+    # page_start
+    page_start = 1
     if 'page_start' in args and args['page_start'] is not None:
         page_start = int(args['page_start'][0])
         if page_start < 1:
             page_start = 1
 
+    # page_end
+    page_end = num_pages
     if 'page_end' in args and args['page_end'] is not None:
         page_end = int(args['page_end'][0])
         if num_pages < page_end:
             page_end = num_pages
 
-    # tesseract doesn't work well one low dpi images
+    # dpi: tesseract doesn't work well on low dpi images
     dpi = 150
     if 'dpi' in args and args['dpi'] is not None:
         try:
@@ -271,40 +275,23 @@ if __name__ == "__main__":
         if dpi < 150:
             dpi = 150
 
-    print(f'[!!] Input file: {pdf_file}, {num_pages} page(s)')
-    print(f'[!!] Going to process page {page_start} to page {page_end}')
+    # tesseract
+    tesseract = ""
+    if has_tesseract and 'tesseract' in args and args['tesseract'] is not None:
+        tesseract = args['tesseract'][0]
+        use_tesseract = True
 
-    # try to extract the text layer
-    text = poppler_get_text(file=pdf_file, start=page_start, end=page_end)
+    # espeak-ng
+    espeakng = ""
+    if has_espeakng and 'espeak_ng' in args and args['espeak_ng'] is not None:
+        espeakng = args['espeak_ng'][0]
+        use_espeak_ng = True
 
-    # fallback: use tesseract ocr
-    if text == "" and not ('tesseract' in args and args['tesseract'] is not None):
-        print("[EE] No text layer found, please use the --tesseract <lang> option to enable OCR!")
-        sys.exit(0)
-    else:
-        num_pages = poppler_convert_to_image(file=pdf_file, dpi=dpi, start=page_start, end=page_end)
-        text = tesseract_scan_pages(start=page_start, end=page_end, language='eng+deu')
-
-    # is there usable text?
-    if text == "":
-        print(f"[EE] Error: Neither libpoppler nor tesseract where able to extract text from {pdf_file}!")
-        sys.exit(1)
-
-    # write the text to a file if demanded
-    if 'sidecar' in args and args['sidecar'] is not None:
-        save_text_to_file(args['sidecar'], text)
-
-    # speech synthesis with eSpeak NG
-    if 'espeak_ng' in args and args['espeak_ng'] is not None:
-        espeak_ng_text_to_wav(text=text, voice=args['espeak_ng'][0])
-        pydub_convert_to_mp3('output.wav', mp3_file)
-        mp3_generated = True
-
-    # if Google Cloud Text-To-Speech is preferred
-    if not mp3_generated:
-        google_key = ""
-        google_voice = ""
-        google_language_code = ""
+    # google text-to-speech
+    google_key = ""
+    google_voice = ""
+    google_language_code = ""
+    if has_google_texttospeech:
         if 'google_oauth2_key' in args and args['google_oauth2_key'] is not None:
             google_key = args['google_oauth2_key'][0]
         if 'google_texttospeech_voice_name' in args and args['google_texttospeech_voice_name'] is not None:
@@ -312,16 +299,75 @@ if __name__ == "__main__":
         if 'google_texttospeech_language_code' in args and args['google_texttospeech_language_code'] is not None:
             google_language_code = args['google_texttospeech_language_code'][0]
         if google_key != "" and google_voice != "" and google_language_code != "":
-            google_texttospeech(text=text, output=mp3_file, key=google_key, language_code=google_language_code,
-                                voice_name=google_voice)
+            use_google_texttospeech = True
 
-    # add ID3 tags to the output file
+    # use only one speech synthesizer
+    if use_espeak_ng and use_google_texttospeech:
+        print('[EE] Please use either eSpeak NG or Google Cloud Text-To-Speech!')
+        sys.exit(0)
+
+    # eyed3
     mp3_artist = ""
     mp3_title = ""
-    if 'mp3_artist' in args and args['mp3_artist'] is not None:
-        mp3_artist = args['mp3_artist']
-    if 'mp3_title' in args and args['mp3_title'] is not None:
-        mp3_title = args['mp3_title']
-    mp3_set_id3(file=mp3_file, artist=mp3_artist, title=mp3_title)
+    if has_eyed3:
+        if 'mp3_artist' in args and args['mp3_artist'] is not None:
+            mp3_artist = args['mp3_artist']
+        if 'mp3_title' in args and args['mp3_title'] is not None:
+            mp3_title = args['mp3_title']
+        use_eyed3 = True
+
+    # sidecar
+    sidecar = ""
+    if 'sidecar' in args and args['sidecar'] is not None:
+        sidecar = args['sidecar']
+        use_sidecar = True
+
+    print(f'[!!] Input file: {pdf_file}, {num_pages} page(s)')
+    print(f'[!!] Processing pages {page_start} to {page_end}')
+
+    whole_text = ""
+    bar = Progressbar('[!!] Progress', max=(page_end - page_start + 1))
+
+    # main working loop
+    for page in range(page_start, page_end + 1):
+        bar.next()
+
+        # use tesseract
+        if use_tesseract:
+            poppler_convert_to_image(file=pdf_file, dpi=dpi, page=page)
+            text = tesseract_scan_page(page=page, language=tesseract)
+        # or poppler
+        else:
+            text = poppler_get_text(file=pdf_file, page=page)
+            if text == "":
+                print(f"\n[EE] No text layer found on page {page}, please use the --tesseract <lang> option to enable OCR!")
+                sys.exit(0)
+
+        whole_text += text
+
+        # speech synthesis with eSpeak NG
+        if use_espeak_ng:
+            espeak_ng_text_to_wav(text=text, voice=espeakng, page=page)
+            pydub_convert_to_mp3(page=page)
+            mp3_generated = True
+
+        # if Google Cloud Text-To-Speech is preferred
+        if use_google_texttospeech:
+            google_texttospeech(text=text, output=f'page-{page}.mp3', key=google_key,
+                                language_code=google_language_code, voice_name=google_voice)
+
+    bar.finish()
+
+    # concat mp3s
+    if has_pydub:
+        pydub_concat_mp3s(page_start=page_start, page_end=page_end, mp3_file=mp3_file)
+
+    # add ID3 tags to the output file
+    if use_eyed3:
+        mp3_set_id3(file=mp3_file, artist=mp3_artist, title=mp3_title)
+
+    # write the whole text to a file if demanded
+    if use_sidecar:
+        save_text_to_file(sidecar, whole_text)
 
     print("[!!] Finished!")
