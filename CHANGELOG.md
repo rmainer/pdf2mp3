@@ -12,6 +12,6 @@
 
 * Completely reworked the text processing: now every page is treaded as and individual document
 
-## [0.1-alpha] (2021-04-02)
+## 0.1-alpha (2021-04-02)
 
 * Initial release
